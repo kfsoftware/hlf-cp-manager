@@ -3,6 +3,8 @@ package resolvers
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"github.com/Masterminds/sprig/v3"
 	"github.com/kfsoftware/hlf-cp-manager/gql/models"
 	"github.com/kfsoftware/hlf-operator/kubectl-hlf/cmd/helpers"
@@ -24,6 +26,15 @@ organizations:
     mspid: {{$mspID}}
     cryptoPath: /tmp/cryptopath
     users: {}
+{{- if not $org.CertAuths }}
+    certificateAuthorities: []
+{{- else }}
+    certificateAuthorities: 
+      {{- range $ca := $org.CertAuths }}
+      - {{ $ca.Name }}-sign
+      - {{ $ca.Name }}-tls
+ 	  {{- end }}
+{{- end }}
 {{- if not $org.Peers }}
     peers: []
 {{- else }}
@@ -90,7 +101,24 @@ certificateAuthorities: []
 certificateAuthorities:
 {{- range $ca := .CertAuths }}
   
-  {{ $ca.Name }}:
+  {{ $ca.Name }}-tls:
+{{if $.Internal }}
+    url: https://{{ $ca.PrivateURL }}
+{{ else }}
+    url: https://{{ $ca.PublicURL }}
+{{ end }}
+{{if $ca.EnrollID }}
+    registrar:
+        enrollId: {{ $ca.EnrollID }}
+        enrollSecret: {{ $ca.EnrollPWD }}
+{{ end }}
+    caName: tlsca
+    tlsCACerts:
+      pem: 
+       - |
+{{ $ca.Status.TlsCert | indent 12 }}
+  
+  {{ $ca.Name }}-sign:
 {{if $.Internal }}
     url: https://{{ $ca.PrivateURL }}
 {{ else }}
@@ -136,6 +164,14 @@ channels:
 
 `
 
+type Organization struct {
+	Type         helpers.OrganizationType
+	MspID        string
+	OrdererNodes []*helpers.ClusterOrdererNode
+	Peers        []*helpers.ClusterPeer
+	CertAuths    []*helpers.ClusterCA
+}
+
 func (r *queryResolver) NetworkConfig(ctx context.Context, mspID string) (*models.NetworkConfig, error) {
 	tmpl, err := template.New("networkConfig").Funcs(sprig.HermeticTxtFuncMap()).Parse(tmplGoConfig)
 	if err != nil {
@@ -161,22 +197,83 @@ func (r *queryResolver) NetworkConfig(ctx context.Context, mspID string) (*model
 	if err != nil {
 		return nil, err
 	}
-	orgMap := map[string]*helpers.Organization{}
+	orgMap := map[string]*Organization{}
 	orgFound := false
 	for _, v := range ordOrgs {
-		orgMap[v.MspID] = v
+		orgMap[v.MspID] = &Organization{
+			Type:         v.Type,
+			MspID:        v.MspID,
+			OrdererNodes: v.OrdererNodes,
+			Peers:        v.Peers,
+			CertAuths:    []*helpers.ClusterCA{},
+		}
 		if v.MspID == mspID {
 			orgFound = true
 		}
 	}
 	for _, v := range peerOrgs {
-		orgMap[v.MspID] = v
+		orgMap[v.MspID] = &Organization{
+			Type:         v.Type,
+			MspID:        v.MspID,
+			OrdererNodes: v.OrdererNodes,
+			Peers:        v.Peers,
+			CertAuths:    []*helpers.ClusterCA{},
+		}
 		if v.MspID == mspID {
 			orgFound = true
 		}
 	}
 	if !orgFound {
 		return nil, errors.Errorf("organization %s not found", mspID)
+	}
+	for _, certAuth := range certAuths {
+		tlsCACertPem := certAuth.Status.TLSCACert
+		roots := x509.NewCertPool()
+		ok := roots.AppendCertsFromPEM([]byte(tlsCACertPem))
+		if !ok {
+			panic("failed to parse root certificate")
+		}
+		for mspID, org := range orgMap {
+			for _, peer := range org.Peers {
+				block, _ := pem.Decode([]byte(peer.Status.TlsCert))
+				if block == nil {
+					continue
+				}
+				cert, err := x509.ParseCertificate(block.Bytes)
+				if err != nil {
+					continue
+				}
+				opts := x509.VerifyOptions{
+					Roots:         roots,
+					Intermediates: x509.NewCertPool(),
+				}
+
+				if _, err := cert.Verify(opts); err == nil {
+					orgMap[mspID].CertAuths = append(orgMap[mspID].CertAuths, certAuth)
+				}
+			}
+		}
+		for _, ord := range ordererNodes {
+			block, _ := pem.Decode([]byte(ord.Status.TlsCert))
+			if block == nil {
+				continue
+			}
+			cert, err := x509.ParseCertificate(block.Bytes)
+			if err != nil {
+				continue
+			}
+			opts := x509.VerifyOptions{
+				Roots:         roots,
+				Intermediates: x509.NewCertPool(),
+			}
+			if _, err := cert.Verify(opts); err == nil {
+				orgMap[ord.Spec.MspID].CertAuths = append(orgMap[ord.Spec.MspID].CertAuths, certAuth)
+			}
+		}
+
+	}
+	for _, ord := range ordererNodes {
+		orgMap[ord.Spec.MspID].OrdererNodes = append(orgMap[ord.Spec.MspID].OrdererNodes, ord)
 	}
 	var peers []*helpers.ClusterPeer
 	for _, peer := range clusterPeers {
