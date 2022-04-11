@@ -1,0 +1,7 @@
+type Query {
+    networkConfig(mspID: String!): NetworkConfig
+}
+
+type NetworkConfig {
+    nc: String!
+}

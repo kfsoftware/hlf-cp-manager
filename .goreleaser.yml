@@ -1,0 +1,49 @@
+# This is an example goreleaser.yaml file with some sane defaults.
+# Make sure to check the documentation at http://goreleaser.com
+project_name: hlf-cp-manager
+
+release:
+  name_template: "Version {{.Version}}"
+  github:
+    owner: kfsoftware
+    name: hlf-cp-manager
+  extra_files:
+    - glob: "*.minisig"
+    - glob: "*.zip"
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod download
+
+builds:
+  -
+    goos:
+      - linux
+      - darwin
+      - windows
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Tag}}
+    flags:
+      - -trimpath
+
+dockers:
+  -
+    # GOOS of the built binary that should be used.
+    goos: linux
+    # GOARCH of the built binary that should be used.
+    goarch: amd64
+    dockerfile: Dockerfile
+    image_templates:
+      - "ghcr.io/kfsoftware/hlf-cp-manager:{{ .Tag }}"
+      - "ghcr.io/kfsoftware/hlf-cp-manager:latest"
+    extra_files:
+      - LICENSE
+      - README.md
+      - CREDITS

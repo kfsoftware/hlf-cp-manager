@@ -1,0 +1,6 @@
+type Mutation {
+    updateNetworkConfig(
+        mspID: String!
+    ): NetworkConfig
+}
+
